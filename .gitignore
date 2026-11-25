@@ -1,0 +1,7 @@
+/.deps/
+/.gradle/
+/.idea/
+/local.properties
+**/build/
+**/.cxx/
+/app/gst-android-build/

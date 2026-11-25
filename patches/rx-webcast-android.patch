@@ -1,0 +1,94 @@
+--- a/src/webcast/WebCastSignaling.cpp
++++ b/src/webcast/WebCastSignaling.cpp
+@@ -1,7 +1,5 @@
+ #include "webcast/WebCastSignaling.h"
+-#include "webcast/TouchbackCapabilities.h"
+ #include "webcast/WebCastSourceInfo.h"
+-#include <axent/control/control_contract.hpp>
+ #include <limits>
+ #include <stdexcept>
+ namespace nearcast::webcast {
+@@ -214,30 +212,6 @@
+         if(socketOpen_&&state_==SignalingState::Ready) out.push_back(socket(WithContext({{"type","kick_member"},{"targetId",key.id}})));
+         pendingKicks_.insert(key.id); RemovePeer(key.id,out); return out;
+     }
+-    if(str(j,"action")=="nearcast-input-source") {
+-        const auto data=j.find("data");if(text.size()>16384||data==j.end()||!data->is_object())return {};
+-        const auto& d=*data;
+-        if(d.contains("displaySurface")&&!d["displaySurface"].is_null()&&(!d["displaySurface"].is_string()||
+-            (d["displaySurface"]!="monitor"&&d["displaySurface"]!="window"&&d["displaySurface"]!="browser"&&d["displaySurface"]!="unknown")))return {};
+-        if(d.contains("controlConsent")){
+-            const auto& consent=d["controlConsent"];if(!consent.is_object())return {};
+-            if(!consent.empty()&&(consent.size()!=2||str(consent,"requestId",128).empty()||
+-                (str(consent,"status")!="pending"&&str(consent,"status")!="accepted"&&str(consent,"status")!="denied"&&str(consent,"status")!="timeout")))return {};
+-        }
+-        if(!d.contains("version")||!d["version"].is_number_integer()||d["version"]!=1||
+-           str(d,"contractFingerprint")!=WebCastTouchbackCapabilities().contractFingerprint||
+-           str(d,"roomId")!=roomId_||str(d,"senderUserId")!=key.id||str(d,"receiverUserId")!=receiverId_||
+-           !d.contains("available")||!d["available"].is_boolean()||!d.contains("inputCapability")||
+-           !axent::control::validate_object("InputStreamCapability",d["inputCapability"]))return {};
+-        const auto& capability=d["inputCapability"];
+-        if(str(capability,"capability")!="input.stream"||str(capability,"direction")!="receiver_to_source"||str(capability,"reliability")!="ordered_reliable")return {};
+-        const auto profiles=capability.value("profiles",Json::array()),formats=capability.value("formats",Json::array());
+-        if(std::find(profiles.begin(),profiles.end(),"AXTP-TYPED-INPUT-V1")==profiles.end()||std::find(formats.begin(),formats.end(),"input-sample-v1")==formats.end())return {};
+-        if(d["available"].get<bool>()){
+-            if(str(d,"sourceBindingId",128).empty()||str(d,"geometryRevision",128).empty()||!d.contains("disabledReason")||!d["disabledReason"].is_null())return {};
+-        }else if(!d.contains("sourceBindingId")||!d["sourceBindingId"].is_null()||!d.contains("geometryRevision")||!d["geometryRevision"].is_null()||str(d,"disabledReason",128).empty())return {};
+-        return {{EffectKind::ControlMessage,key,std::move(j)}};
+-    }
+     auto data=j.find("data");
+     if(str(j,"action")!="webrtc-signal"||data==j.end()||!data->is_object()) return {};
+     const auto type=str(*data,"type"); auto payload=data->find("payload");
+--- a/src/webcast/GstWebRtcReceiver.cpp
++++ b/src/webcast/GstWebRtcReceiver.cpp
+@@ -1,5 +1,4 @@
+ #include "webcast/GstWebRtcReceiver.h"
+-#include "media/gstreamer/presentation/AudioDiagnosticGst.h"
+ #include <gst/gst.h>
+ #include <gst/app/gstappsink.h>
+ #include <gst/webrtc/webrtc.h>
+@@ -13,7 +12,6 @@
+ namespace nearcast::webcast {
+ using namespace nearcast::media;
+ namespace {
+-std::atomic<std::uint64_t> captureHelperId{0};
+ std::uint64_t hostNow(){return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+ EncodedMediaChunkFlag h264Flags(const EncodedMediaBytes& bytes){
+     auto flags=EncodedMediaChunkFlag::EndOfFrame;
+@@ -33,8 +31,6 @@
+ }
+ }
+ struct GstWebRtcReceiver::State : std::enable_shared_from_this<State> {
+-    std::shared_ptr<nearcast::media::gstreamer::presentation::AudioDiagnosticCapture> audioCapture;
+-    std::uint64_t captureId = ++captureHelperId;
+     enum class Op { Public, Remote, Answer, Local };
+     struct Pending {Op op=Op::Public;std::uint64_t promiseId=0,negotiation=0;bool okay=true;std::string sdp;RtcEvent event{RtcEventKind::Fault};std::size_t bytes=0;};
+     struct PromiseContext {std::shared_ptr<State> state;Op op;std::uint64_t id,negotiation;};
+@@ -210,18 +206,6 @@
+         GError* error=nullptr;auto* bin=gst_parse_bin_from_description(launch,TRUE,&error);
+         if(!bin||error){if(error)g_error_free(error);if(bin)gst_object_unref(bin);self.fail("receiver_branch_unavailable");return;}
+         auto* sink=gst_bin_get_by_name(GST_BIN(bin),"out");auto generation=++self.nextTrack;
+-        if(audioKind&&self.audioCapture) {
+-            using namespace nearcast::media::gstreamer::presentation;
+-            AudioCaptureRecord r;r.stage="webcast-opus-decoded";r.branchId=self.captureId;r.trackGeneration=generation;
+-            r.pipelineId="webrtc-helper-"+std::to_string(self.captureId);
+-            r.detail="clockDomain=webrtc-helper; PTS is not product pipeline time";
+-            auto* decoder=gst_bin_get_by_name(GST_BIN(bin),"audiodecoder");
+-            auto* queue=gst_bin_get_by_name(GST_BIN(bin),"audioqueue");
+-            auto* pad=gst_element_get_static_pad(decoder,"src");
+-            InstallAudioDiagnosticTap(pad,self.audioCapture,r,nullptr,queue);gst_object_unref(pad);gst_object_unref(decoder);
+-            pad=gst_element_get_static_pad(sink,"sink");r.stage="webcast-handoff";
+-            InstallAudioDiagnosticTap(pad,self.audioCapture,r,nullptr,queue);gst_object_unref(pad);gst_object_unref(queue);
+-        }
+         auto* context=new SampleContext{&self,mediaKind,generation};GstAppSinkCallbacks callbacks{};callbacks.new_sample=sample;
+         gst_app_sink_set_callbacks(GST_APP_SINK(sink),&callbacks,context,+[](gpointer p){delete static_cast<SampleContext*>(p);});gst_object_unref(sink);
+         gst_bin_add(GST_BIN(self.pipeline),bin);auto* target=gst_element_get_static_pad(bin,"sink");
+@@ -261,8 +245,6 @@
+ }
+ bool GstWebRtcReceiver::Start(const std::string& stun){
+     auto& s=*state_;if(s.started||s.stopping)return false;
+-    try{s.audioCapture=nearcast::media::gstreamer::presentation::AudioDiagnosticCapture::FromEnvironment("webcast-helper");}
+-    catch(...){return false;}
+     if(!RuntimeFailure().empty())return false;
+     s.pipeline=gst_pipeline_new(nullptr);s.rtc=gst_element_factory_make("webrtcbin",nullptr);
+     if(!s.pipeline||!s.rtc){Stop();return false;}gst_bin_add(GST_BIN(s.pipeline),s.rtc);

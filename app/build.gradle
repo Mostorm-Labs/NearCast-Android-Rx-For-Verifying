@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+}
+
+def sdkRoot = providers.environmentVariable('GSTREAMER_ROOT_ANDROID')
+        .orElse(rootProject.file('.deps/gstreamer/sdk').absolutePath)
+        .get()
+
+android {
+    namespace 'com.mostorm.nearcast.rx'
+    compileSdk 35
+    ndkVersion '27.2.12479018'
+
+    defaultConfig {
+        applicationId 'com.mostorm.nearcast.rx'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '0.1-demo'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+        externalNativeBuild {
+            ndkBuild {
+                arguments "GSTREAMER_ROOT_ANDROID=${sdkRoot}",
+                        "GSTREAMER_BUILD_DIR=${layout.buildDirectory.dir('gstreamer/arm64-v8a').get().asFile.absolutePath}"
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main.java.srcDir "${sdkRoot}/arm64/share/gst-android/ndk-build"
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path 'src/main/cpp/Android.mk'
+        }
+    }
+}
